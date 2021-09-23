@@ -1,164 +1,92 @@
-/******************************************************************************
-   Adaptado del ejemplo de Platformio-ESP-IDF: http_request_example_main y de WiFi STA
-******************************************************************************/
-
 //==================== Inclusiones ==========================
 #include <string.h>
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include <stdio.h>
+#include "driver/gpio.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
-#include "esp_netif.h"
-#include "esp_http_client.h"
-#include "esp_wifi.h"
-#include "lwip/sockets.h"
-#include "lwip/netdb.h"
-#include "openssl/ssl.h"
+#include "sdkconfig.h"
+#include "soc/soc.h" //disable brownout detector
+#include "soc/rtc_cntl_reg.h" //disable brownout detector (deteccion de apagon)
+#include "soc/rtc_wdt.h"
 
-//==================== Definiciones ==========================
-#define WIFI_SSID      "Nombre de la red"
-#define WIFI_PASS      "Contraseña"
-#define MAXIMUM_RETRY  2
-// El event group permite múltiples bits para cada evento, pero solo nos interesan dos:
-#define WIFI_CONNECTED_BIT BIT0 //está conectado al AP con una IP
-#define WIFI_FAIL_BIT      BIT1 //no pudo conectarse después de la cantidad máxima de reintentos
-#define THINGSPEAK_API_WRITE_KEY "XUK6QQH3ILI7JGIM"
-#define WEB_SERVER "api.thingspeak.com"
-#define WEB_PORT "80"
+#include "../include/I2C.h"
+#include "../include/RTC.h"
+#include "../include/Uart.h"
+#include "../include/LCDI2C.h"
+#include "../include/WIFI_Control.h"
+
+//=========================== Definiciones ================================
+
+//Posicion del registro interno del RTC donde se encuentra cada uno de los siguiente valores (VER DATASHEET DS3231)
+#define SEGUNDOS 0X00 
+#define MINUTOS 0X01
+#define HORA 0X02
+#define DIA_SEMANA 0X03  //Establece el dia de la semana del 1 al 7
+#define DIA_MES 0X04     //Establece el numero del dia en el mes
+#define MES 0X05
+#define ANIO 0X06
+//pines de I2C
+#define I2C_MASTER_SCL_IO 5            /*!< gpio number for I2C master clock */
+#define I2C_MASTER_SDA_IO 4            /*!< gpio number for I2C master data  */
+
+static void tareaHttp(void *pvParameters);
 
 //================== Variables y constantes =======================
-static EventGroupHandle_t s_wifi_event_group; //FreeRTOS event group para señalar cuando está conectado
-static int s_retry_num = 0;
-const static char *TAG = "Ejemplo_thingspeak_client";
-static const char *REQUEST = "GET /update?api_key=XUK6QQH3ILI7JGIM&field1=%i\r\n"; //Solicitud para escribir el campo 1
+const char *TAG = "Ejemplo_thingspeak_client";
+const char *REQUEST = "GET /update?api_key=KPC7Y114VMMZOF59&field1=%i\r\n"; //Solicitud para escribir el campo 1
 int valor = 0;
-
-//================== Prototipos =======================
-static void eventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
-void iniciarWifi(void);
-static void tareaHttp(void *pvParameters);
 
 //================== Función principal =======================
 void app_main(void)
 {
+    i2c_master_init(I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO);     //Inicializo el i2c
+    LCDI2C_init();  //Inicializo el LCD
+    //config_Uart();  //Configuro el uart para recibir dato y cambiar los valores de fecha y hora
     iniciarWifi();
-    
+
     esp_err_t ret = xTaskCreate(&tareaHttp, "tareaHttp", 4096, NULL, 5, NULL);
     if (ret != pdPASS)  {
         ESP_LOGI(TAG, "Error al crear tarea");
+    
+   //Bucle infinito 
+    while(1) {
+
+        //obtengo datos desde el RTC
+	    uint8_t Segundos;
+        uint8_t Minutos;
+        uint8_t Hora;
+        uint8_t Dia;
+        uint8_t Mes;
+        uint8_t Anio;
+        RTC_read(SEGUNDOS, &Segundos);
+        RTC_read(MINUTOS, &Minutos);
+        RTC_read(HORA, &Hora);
+        RTC_read(DIA_MES, &Dia);
+        RTC_read(MES, &Mes);
+        RTC_read(ANIO, &Anio);
+
+        //Imprimo los resultados en el monitor serial
+		printf("%02x/%02x/%02x - %02x:%02x:%02x\n", Dia, Mes, Anio, Hora, Minutos, Segundos);
+
+        //Imprimo los resultados en el display lcd 16x2 i2c
+        char fila1[16]; //arreglo de caracteres a mostrar en fila 1
+        char fila2[16]; //arreglo de caracteres a mostrar en fila 2
+        sprintf( fila1, "    %02x/%02x/%02x", Dia, Mes, Anio); //Escribo arreglo de fila 1
+        sprintf( fila2, "    %02x:%02x:%02x", Hora, Minutos, Segundos); //Escribo arreglo de fila 2
+
+        lcd_gotoxy(1,1);  //Posiciono el cursor en el caracter 1-1
+        lcd_print(fila1); //Imprimo fila 1 en display
+        lcd_gotoxy(1,2); //Posiciono el cursor en el caracter 1-2
+        lcd_print(fila2); //Imprimo fila 1 en display
+        vTaskDelay(1000 / portTICK_PERIOD_MS); //Espero 1000 milisegundo
+        }
     }
 }
 
 //================== Funciones =======================
-void iniciarWifi(void)
-{
-    esp_err_t ret = nvs_flash_init(); //Inicializa el almacenamiento no volatil (NVS)
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-    s_wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK(esp_netif_init()); //Inicializa el TCP/IP stack
-    ESP_ERROR_CHECK(esp_event_loop_create_default()); //Crea un event loop
-
-    //Crea WIFI STA por defecto. En caso de cualquier error de inicialización, 
-    //esta API se cancela.
-    //La API crea el objeto esp_netif con la configuración predeterminada de la estación WiFi,
-    //adjunta el netif a wifi y registra los controladores de wifi predeterminados.
-    esp_netif_create_default_wifi_sta(); 
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT(); //Parámetros de configuración del WiFi stack
-    
-    //Inicia el recurso WiFi Alloc para el controlador WiFi,
-    // como la estructura de control WiFi, el búfer RX / TX, la estructura WiFi NVS, etc.
-    // También inicia la tarea WiFi.
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t instance_any_id, instance_got_ip;
-
-    //Registra una instancia del controlador de eventos en el bucle predeterminado.
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &eventHandler,
-                                                        NULL,
-                                                        &instance_any_id));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &eventHandler,
-                                                        NULL,
-                                                        &instance_got_ip));
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,          //Nombre de la red
-            .password = WIFI_PASS,      //Contraseña
-	        .threshold.authmode = WIFI_AUTH_WPA2_PSK, //tipo de autenticación
-            .pmf_cfg = {
-                .capable = true, //Anuncia la compatibilidad con Protected Management Frame (PMF). El dispositivo preferirá conectarse en modo PMF si otro dispositivo también anuncia la capacidad PMF.
-                .required = false //Anuncia que se requiere Protected Management Frame (PMF). El dispositivo no se asociará a dispositivos que no sean compatibles con PMF.
-            },
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) ); //Configura el modo STA, AP o STA+AP
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) ); //Configura el WiFI segun el modo seleccionado
-    ESP_ERROR_CHECK(esp_wifi_start() ); //Inicia el Wifi
-    ESP_LOGI(TAG, "Se finalizó la inicialización del WiFi.");
-    /*
-    Espera hasta que se establezca la conexión (WIFI_CONNECTED_BIT)
-    o la conexión falle para el número máximo de reintentos (WIFI_FAIL_BIT).
-    Los bits son establecidos por eventHandler ()
-    */
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
-
-    /* xEventGroupWaitBits() devuelve los bits antes de que se devolviera la llamada,
-    por lo que podemos probar qué evento sucedió realmente. */
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Conectado al AP SSID:%s password:%s",
-                 WIFI_SSID, WIFI_PASS);
-    } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG, "Fallo al conectar al AP SSID:%s, password:%s",
-                 WIFI_SSID, WIFI_PASS);
-    } else {
-        ESP_LOGE(TAG, "Evento inesperado");
-    }
-
-    /* The event will not be processed after unregister */
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
-    vEventGroupDelete(s_wifi_event_group);
-}
-
-static void eventHandler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect(); //conecta el ESP al AP elegido
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < MAXIMUM_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "retry to connect to the AP");
-        } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-        }
-        ESP_LOGI(TAG,"connect to the AP fail");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-    }
-}
-
 static void tareaHttp(void *pvParameters)
 {
     const struct addrinfo hints = {
@@ -221,32 +149,3 @@ static void tareaHttp(void *pvParameters)
         ESP_LOGI(TAG, "Reiniciando conexión!");
     }
 }
-
-
-/*
-//Para leer una respuesta del socket
-int s, r;
-char recv_buf[64];
-//...
-struct timeval receiving_timeout;
-receiving_timeout.tv_sec = 5;
-receiving_timeout.tv_usec = 0;
-//SO_RCVTIMEO permite establecer un tiempo límite para la respuesta
-if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &receiving_timeout, sizeof(receiving_timeout)) < 0) {
-    ESP_LOGE(TAG, "... failed to set socket receiving timeout");
-    close(s);
-    vTaskDelay(4000 / portTICK_PERIOD_MS);
-    continue;
-}
-ESP_LOGI(TAG, "... set socket receiving timeout success");
-
-//Lee la respuesta del servidor
-do {
-    bzero(recv_buf, sizeof(recv_buf));
-    r = read(s, recv_buf, sizeof(recv_buf)-1);
-    for(int i = 0; i < r; i++) {
-        putchar(recv_buf[i]);
-    }
-} while(r > 0);
-
-ESP_LOGI(TAG, "Se leyó correctamente desde el socket. Último dato leído = %d errno=%d.", r, errno);*/

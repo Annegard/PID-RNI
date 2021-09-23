@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "wifi_control.h": "c",
+        "rtc_cntl_reg.h": "c",
+        "lcdi2c.h": "c",
+        "i2c.h": "c"
+    }
+}
