@@ -1,0 +1,8 @@
+https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sdspi_host.html
+
+https://www.youtube.com/watch?v=igrzHrdmGqs
+
+https://github.com/arduino-libraries/SD/blob/master/src/SD.cpp
+
+https://naylampmechatronics.com/blog/38_tutorial-arduino-y-memoria-sd-y-micro-sd.html
+

@@ -53,7 +53,7 @@ void app_main(void)
     
    //Bucle infinito 
     while(1) {
-
+        /*
         //obtengo datos desde el RTC
 	    uint8_t Segundos;
         uint8_t Minutos;
@@ -81,7 +81,7 @@ void app_main(void)
         lcd_print(fila1); //Imprimo fila 1 en display
         lcd_gotoxy(1,2); //Posiciono el cursor en el caracter 1-2
         lcd_print(fila2); //Imprimo fila 1 en display
-        vTaskDelay(1000 / portTICK_PERIOD_MS); //Espero 1000 milisegundo
+        vTaskDelay(1000 / portTICK_PERIOD_MS); //Espero 1000 milisegundo*/
         }
     }
 }
